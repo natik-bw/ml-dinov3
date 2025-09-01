@@ -16,3 +16,6 @@ dist/
 
 # Ignore vscode directory
 .vscode/
+bw_dinov3.code-workspace
+.idea/
+checkpoints/*

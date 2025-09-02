@@ -94,11 +94,12 @@ def process_cached_features(cache_path: Path, class_name: str, output_dir: Path)
 
 def main(args):
     """Main function to extract and save DINO embeddings with caching."""
-    print(f"Starting DINO embeddings extraction for {args.dataset_path.stem} dataset - class: {args.class_name}")
+    print(
+        f"Starting DINO embeddings extraction for {args.dataset_path.stem} dataset - class: {args.segmentation_class_name}")
 
     # Define cache path
     args.output_dir.mkdir(exist_ok=True, parents=True)
-    cache_filename = f"raw_features_cache_{args.class_name}_{args.model_name}_{args.patch_size}_{args.image_size}.pkl"
+    cache_filename = f"raw_features_cache_{args.segmentation_class_name}_{args.model_name}_{args.dino_patch_size}_{args.image_size}.pkl"
     cache_path = args.output_dir / cache_filename
 
     # Check if cache exists
@@ -108,12 +109,13 @@ def main(args):
     else:
         print("No cache found, extracting raw features...")
         extract_raw_features(
-            args.class_name, args.patch_size, args.image_size, args.dataset_path, args.dinov3_location, args.model_name,
+            args.segmentation_class_name, args.dino_patch_size, args.image_size, args.dataset_path,
+            args.dinov3_location, args.model_name,
             args.checkpoint_path, cache_path
         )
 
     # Process cached features
-    process_cached_features(cache_path, args.class_name, args.output_dir)
+    process_cached_features(cache_path, args.segmentation_class_name, args.output_dir)
 
     print("DINO embeddings extraction completed successfully!")
 
@@ -128,8 +130,8 @@ if __name__ == "__main__":
     DEFAULT_CHECKPOINT_PATH = Path("/home/nati/source/dinov3/checkpoints/dinov3_vits16_pretrain.pth")
 
     parser = argparse.ArgumentParser(description="Extract DINO embeddings for bw2508 dataset")
-    parser.add_argument("--class_name", default="tree", help="Class name to extract embeddings for")
-    parser.add_argument("--patch_size", type=int, default=DEFAULT_PATCH_SIZE, help="Patch size for DINOv3 model")
+    parser.add_argument("--segmenation_class_name", default="tree", help="Class name to extract embeddings for")
+    parser.add_argument("--dino_patch_size", type=int, default=DEFAULT_PATCH_SIZE, help="Patch size for DINOv3 model")
     parser.add_argument("--image_size", type=int, default=DEFAULT_IMAGE_SIZE, help="Target image height in pixels")
     parser.add_argument("--dataset_path", type=Path, default=DEFAULT_DATASET_PATH, help="Path to bw2508 dataset")
     parser.add_argument("--dinov3_location", type=Path, default=DEFAULT_DINOV3_LOCATION,

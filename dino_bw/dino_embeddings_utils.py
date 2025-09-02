@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from bw_ml_common.datasets.data_accessor_factory import create_dataset_accessor
 
-from dino_bw.bw_dino_defs import IMAGENET_MEAN, IMAGENET_STD, MODEL_TO_NUM_LAYERS
+from dino_bw.bw_defs import IMAGENET_MEAN, IMAGENET_STD, MODEL_TO_NUM_LAYERS
 
 
 def setup_patch_quantization_filter(patch_size: int):

@@ -94,6 +94,8 @@ def visualize_results(image, result: DinoLRResult, output_dir: Path | None = Non
 
     axes[1, 1].axis('off')  # Empty subplot
 
+    fig1.subplots_adjust(wspace=0.05, hspace=0.05)
+
     if output_dir and image_name:
         output_dir.mkdir(parents=True, exist_ok=True)
         fig1.savefig(output_dir / f"{image_name}_results.png")
@@ -102,10 +104,12 @@ def visualize_results(image, result: DinoLRResult, output_dir: Path | None = Non
         plt.show()
 
     # Create and plot overlay
-    h, w = result.fg_score_mf.shape
-    overlay_rgba = np.zeros((h, w, 4), dtype=np.float32)
-    overlay_rgba[(result.fg_score_mf >= 0.5).numpy()] = [0, 1, 0, 0.15]  # Green
-    overlay_rgba[(result.fg_score_mf < 0.5).numpy()] = [1, 0, 0, 0.15]   # Red
+    fg_score_resized = cv2.resize(result.fg_score, dsize=image.size, interpolation=cv2.INTER_LINEAR)
+    fg_score_resized_mf = signal.medfilt2d(fg_score_resized, kernel_size=5)
+
+    overlay_rgba = np.zeros((fg_score_resized_mf.shape[0], fg_score_resized_mf.shape[1], 4), dtype=np.float32)
+    overlay_rgba[fg_score_resized_mf >= 0.5] = [0, 1, 0, 0.15]  # Green
+    overlay_rgba[fg_score_resized_mf < 0.5] = [1, 0, 0, 0.15]   # Red
 
     fig2 = plt.figure(figsize=(8, 8), dpi=200)
     plt.imshow(image)

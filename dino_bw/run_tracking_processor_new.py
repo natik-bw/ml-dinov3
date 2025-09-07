@@ -65,7 +65,7 @@ def main(
         return
 
     # Get tree class ID
-    data_accessor = create_dataset_accessor("bw2508", str(data_folder))
+    data_accessor = create_dataset_accessor(data_folder)
     tree_class_id = get_class_idx_from_name(data_accessor, "tree")
     print(f"Using tree class ID: {tree_class_id}")
 
@@ -118,6 +118,8 @@ def main(
     for i, (frame_data, trees) in enumerate(zip(frames_data, all_trees)):
         frame_idx = frame_indices[i]
         save_path = debugging_folder / f"tree_objects_frame_{frame_idx}.png" if debugging_folder else None
+        
+        print(f"Visualizing tree objects for frame {frame_idx}...")
         visualize_tree_objects(frame_data, trees, data_folder, save_path=save_path)
 
     # STAGE 3: Compute unified PCA across all frames
@@ -147,13 +149,13 @@ def main(
             # Visualize individual frame
             save_path = debugging_folder / f"patch_colors_frame_{frame_idx}.png" if debugging_folder else None
             visualize_patch_colors(frame_data, patch_color_data, data_folder, patch_size,
-                                 alpha=0.4, save_path=save_path)
+                                 alpha=0.7, save_path=save_path)
 
         # STAGE 5: Create united PCA visualization
         print("\n=== STAGE 5: CREATING UNITED PCA VISUALIZATION ===")
         save_path = debugging_folder / "united_pca_visualization.png" if debugging_folder else None
         visualize_united_pca_overlay(frames_data, patch_color_data_list, data_folder,
-                                   patch_size, alpha=0.4, save_path=save_path)
+                                   patch_size, alpha=0.6, save_path=save_path)
 
     # STAGE 6: Compute correspondences between first two frames
     if len(all_trees) >= 2:

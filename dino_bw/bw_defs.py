@@ -1,3 +1,6 @@
+from pathlib import Path
+
+DINO_V3_REPO = Path(__file__).parent.parent
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 MODEL_TO_NUM_LAYERS = {

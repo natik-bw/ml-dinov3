@@ -24,7 +24,8 @@ def visualize_tree_objects(
         frame_data: Dict[str, Any],
         tree_objects: List[TreeObject],
         data_folder: Path,
-        save_path: Optional[Path] = None
+        save_path: Optional[Path] = None,
+        auto_close_fig: bool = True,
 ) -> None:
     """
     Visualize tree objects on the original image with concise labels.
@@ -76,7 +77,10 @@ def visualize_tree_objects(
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Visualization saved to {save_path}")
 
-    plt.show()
+    if auto_close_fig:
+        plt.close()
+    else:
+        plt.show()
 
 
 def visualize_patch_colors(
@@ -85,7 +89,8 @@ def visualize_patch_colors(
         data_folder: Path,
         patch_size: int,
         alpha: float = 0.5,
-        save_path: Optional[Path] = None
+        save_path: Optional[Path] = None,
+        auto_close_fig: bool = True,
 ) -> None:
     """
     Visualize patch-level PCA colors overlaid on the original image.
@@ -173,7 +178,10 @@ def visualize_patch_colors(
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Patch color visualization saved to {save_path}")
 
-    plt.show()
+    if auto_close_fig:
+        plt.close()
+    else:
+        plt.show()
 
     # Print statistics
     tree_patches_count = np.sum(patch_mask)
@@ -347,12 +355,12 @@ def visualize_united_pca_overlay(
         return
 
     num_frames = len(frames_data)
-    
+
     # Calculate grid layout for subplots
     cols = min(3, num_frames)  # Max 3 columns
     rows = (num_frames + cols - 1) // cols  # Ceiling division
-    
-    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 6*rows))
+
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
     if num_frames == 1:
         axes = [axes]
     elif rows == 1:
@@ -365,9 +373,9 @@ def visualize_united_pca_overlay(
     for i, (frame_data, patch_color_data) in enumerate(zip(frames_data, patch_color_data_list)):
         if i >= len(axes):
             break
-            
+
         ax = axes[i]
-        
+
         # Load and resize image
         image_path = data_folder / "images" / frame_data['filename']
         if not image_path.exists():

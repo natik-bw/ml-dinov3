@@ -652,6 +652,7 @@ class VideoTracker:
         # Internal state
         self.next_trunk_id = 1  # Start from 1, background is 0
         self.frame_count = 0
+        self.background_id = 0
 
     def get_next_trunk_id(self) -> int:
         """Get the next available trunk ID."""
@@ -746,6 +747,60 @@ class VideoTracker:
         print(f"Created temp index mapping: {temp_mapping}")
         return temp_mapping
 
+    def convert_instance_masks_to_one_hot(
+            self,
+            continuous_mapping_dict: Dict[int, int],
+            h_patches: int,
+            w_patches: int
+    ) -> torch.Tensor:
+        """
+        Convert instance masks from context window to one-hot probability matrices.
+        
+        Args:
+            continuous_mapping_dict: Mapping from original trunk_id to continuous temp_id
+        Returns:
+            context_probs: [num_context_frames, h_patches, w_patches, M] one-hot matrices
+                          where M is the number of active trunk instances (including background)
+        """
+        num_classes = len(continuous_mapping_dict)  # M = number of active trunk instances + background
+        num_context_frames = len(self.context_frames)
+
+        print(f"Converting {num_context_frames} context frames to one-hot with {num_classes} classes")
+
+        # Initialize one-hot tensor
+        context_probs = torch.zeros(num_context_frames, h_patches, w_patches, num_classes)
+
+        # Convert each frame's instance mask to one-hot
+        for frame_idx, frame_info in enumerate(self.context_frames):
+            instance_mask = frame_info.trunk_instance_mask  # [h_patches, w_patches]
+            print(f"  Processing frame {frame_idx}: instance_mask shape = {instance_mask.shape}")
+
+            # Create one-hot encoding for this frame
+            frame_one_hot = torch.zeros(h_patches, w_patches, num_classes)
+            print(f"  Created frame_one_hot with shape: {frame_one_hot.shape}")
+
+            # For each original trunk ID, assign to corresponding temp class
+            for orig_id, temp_id in continuous_mapping_dict.items():
+                mask = (instance_mask == orig_id)  # Boolean mask for this trunk ID
+                num_pixels = mask.sum().item()
+                if num_pixels > 0:
+                    print(f"    Assigning {num_pixels} pixels from orig_id={orig_id} to temp_id={temp_id}")
+                frame_one_hot[:, :, temp_id][mask] = 1.0
+
+            # Ensure each pixel has exactly one class (should be guaranteed by construction)
+            pixel_sums = frame_one_hot.sum(dim=-1)  # [h_patches, w_patches]
+            if not torch.allclose(pixel_sums, torch.ones_like(pixel_sums)):
+                raise ValueError(f"Frame {frame_idx} one-hot encoding not properly normalized")
+
+            context_probs[frame_idx] = frame_one_hot
+
+            # Debug info
+            unique_orig_ids = instance_mask.unique().tolist()
+            unique_temp_ids = torch.argmax(frame_one_hot, dim=-1).unique().tolist()
+            print(f"  Frame {frame_idx}: orig_ids={unique_orig_ids} -> temp_ids={unique_temp_ids}")
+
+        return context_probs
+
     def process_frame(
             self,
             video_frame: 'VideoFrameData',
@@ -792,9 +847,14 @@ class VideoTracker:
             # Create temp index mapping
             temp_mapping = self.create_temp_index_mapping()
 
-            # TODO: Implement propagation logic here
-            # For now, create a dummy mask
-            trunk_instance_mask = torch.zeros_like(segmentation)
+            # Implement context-based inference
+            trunk_instance_mask = self.compute_context_based_inference(
+                features,
+                binary_semantic_segmentation,
+                temp_mapping,
+                patch_size,
+                target_image_size
+            )
 
             # Add to context
             frame_info = FrameInformation(trunk_instance_mask, features, self.frame_count)
@@ -811,6 +871,132 @@ class VideoTracker:
         binary_semantic_segmentation = np.zeros_like(full_semantic_segmentation)
         binary_semantic_segmentation[full_semantic_segmentation == class_id] = 1
         return binary_semantic_segmentation
+
+    def compute_context_based_inference(
+            self,
+            current_features: torch.Tensor,  # [H_patches, W_patches, feature_dim]
+            current_segmentation: torch.Tensor,  # [H_patches, W_patches] binary segmentation
+            temp_mapping: Dict[int, int],
+            patch_size: int,
+            target_image_size: Tuple[int, int]
+    ) -> torch.Tensor:
+        """
+        Compute trunk instance segmentation using context-based inference.
+        
+        Steps:
+        1. Create context features and probabilities from context frames
+        2. Use neighborhood mask for spatial constraints
+        3. Compute similarity between current frame and context frames
+        4. Assign labels based on most similar patches
+        
+        Args:
+            current_features: Features of current frame
+            current_segmentation: Binary segmentation of current frame (1=tree, 0=background)
+            temp_mapping: Mapping from trunk_id to continuous temp_id
+            patch_size: Size of patches
+            target_image_size: Target image size
+            
+        Returns:
+            trunk_instance_mask: [H_patches, W_patches] with trunk instance assignments
+        """
+        print(f"  Computing context-based inference with {len(self.context_frames)} context frames")
+
+        h_patches, w_patches, feature_dim = current_features.shape
+        # Initialize result mask
+        trunk_instance_mask = torch.zeros_like(current_segmentation)
+
+        if len(self.context_frames) == 0:
+            raise ValueError("This function shouldn't be called without context frames for now")
+
+        # Step 1: Prepare context features and probabilities
+        context_features = self.prepare_context_features(h_patches, w_patches, feature_dim)
+        context_probs = self.convert_instance_masks_to_one_hot(temp_mapping, h_patches, w_patches)
+
+        if context_features is None:
+            raise ValueError("No valid context features. This shouldn't happen")
+
+        print(f"  Context features shape: {context_features.shape}")
+        print(f"  Context probabilities shape: {context_probs.shape}")
+
+        # Step 2: Create neighborhood mask for spatial constraints
+        neighborhood_size = 12.0  # Adjust as needed
+        neighborhood_mask = make_neighborhood_mask(h_patches, w_patches, neighborhood_size, "circle")
+
+        # Move to GPU if available
+        device = current_features.device
+        context_features = context_features.to(device)
+        context_probs = context_probs.to(device)
+        neighborhood_mask = neighborhood_mask.to(device)
+
+        # Step 3: Compute similarity and propagate labels
+        topk = min(10, context_features.shape[0] * h_patches * w_patches // 4)  # Adaptive topk
+        temperature = 0.1
+
+        print(f"  Using topk={topk}, temperature={temperature}")
+
+        # Use the existing propagation function
+        predicted_probs = propogate_context_masked_probs(
+            current_features=current_features,
+            context_features=context_features,
+            context_probs=context_probs,
+            neighborhood_mask=neighborhood_mask,
+            topk=topk,
+            temperature=temperature
+        )  # [h_patches, w_patches, num_classes]
+
+        # Find most likely class for each patch
+        predicted_classes = torch.argmax(predicted_probs, dim=-1)  # [h_patches, w_patches]
+
+        print(f"  Predicted temp classes: {predicted_classes.unique().tolist()}")
+
+        # Only assign to patches that are trees in the current segmentation
+        tree_mask = (current_segmentation == 1)
+
+        reverse_temp_mapping = {v: k for k, v in temp_mapping.items()}
+        print(f"  Reverse temp mapping: {reverse_temp_mapping}")
+
+        for orig_id, temp_id in temp_mapping.items():
+            mask = (predicted_classes == temp_id)
+            trunk_instance_mask[mask] = orig_id
+
+            num_assigned_this_id = mask.sum().item()
+            if num_assigned_this_id > 0:
+                print(
+                    f"    Assigned {num_assigned_this_id} patches to original trunk ID {orig_id} (from temp ID {temp_id})")
+
+        # Count assignments
+        num_assigned = (trunk_instance_mask > 0).sum().item()
+        num_tree_patches = tree_mask.sum().item()
+        unique_trunk_ids = trunk_instance_mask.unique().tolist()
+        if self.background_id in unique_trunk_ids:
+            unique_trunk_ids.remove(self.background_id)
+
+        print(f"  Final assignment: {num_assigned}/{num_tree_patches} tree patches assigned to trunk instances")
+        print(f"  Unique trunk IDs in result: {unique_trunk_ids}")
+
+        return trunk_instance_mask
+
+    def prepare_context_features(
+            self,
+            h_patches: int,
+            w_patches: int,
+            feature_dim: int
+    ) -> Optional[torch.Tensor]:
+        """
+        Prepare context features from context frames.
+        
+        Returns:
+            context_features: [num_context_frames, h_patches, w_patches, feature_dim]
+        """
+        if len(self.context_frames) == 0:
+            raise ValueError("This function shouldn't be called without context frames for now")
+
+        context_features = torch.zeros(len(self.context_frames), h_patches, w_patches, feature_dim)
+        for i, frame_info in enumerate(self.context_frames):
+            context_features[i] = frame_info.feature_map
+
+        print(f"  Prepared context features: {len(self.context_frames)} frames, feature_dim={feature_dim}")
+        return context_features
 
 
 def main_reference(

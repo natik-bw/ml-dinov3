@@ -484,18 +484,21 @@ class TrunkFrameInformation:
     """Stores information for a single frame in the context window."""
 
     def __init__(self, trunk_instance_mask: torch.Tensor, feature_map: torch.Tensor, frame_idx: int,
-                 context_based_mask: Optional[torch.Tensor] = None):
+                 context_based_mask: Optional[torch.Tensor] = None,
+                 bbox_tracking_info: Optional[List[Dict[str, Any]]] = None):
         """
         Args:
             trunk_instance_mask: [H_patches, W_patches] final trunk instance segmentation mask
             feature_map: [H_patches, W_patches, feature_dim] feature map
             frame_idx: Frame index in the video sequence
             context_based_mask: [H_patches, W_patches] raw context-based inference result (optional)
+            bbox_tracking_info: List of dicts with bbox_index, tracking_index, and bbox coordinates (optional)
         """
         self.trunk_instance_mask = trunk_instance_mask
         self.feature_map = feature_map
         self.frame_idx = frame_idx
         self.context_based_mask = context_based_mask
+        self.bbox_tracking_info = bbox_tracking_info or []
 
 
 class TrunkVideoTracker:
@@ -680,9 +683,9 @@ class TrunkVideoTracker:
             video_frame: 'VideoFrameData',
             patch_size: int,
             target_image_size: Tuple[int, int]
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]:
+    ) -> TrunkFrameInformation:
         """
-        Process a single frame and return trunk instance segmentation, context-based mask, and bbox tracking info.
+        Process a single frame and return complete frame information.
 
         Args:
             video_frame: VideoFrameData object containing frame information
@@ -690,10 +693,12 @@ class TrunkVideoTracker:
             target_image_size: (width, height) of target image
 
         Returns:
-            Tuple of (trunk_instance_mask, context_based_mask, bbox_tracking_info): 
-                trunk_instance_mask: [H_patches, W_patches] final trunk instance segmentation
-                context_based_mask: [H_patches, W_patches] raw context-based inference result
-                bbox_tracking_info: List of dicts with bbox_index, tracking_index, and bbox coordinates
+            TrunkFrameInformation object containing:
+                - trunk_instance_mask: [H_patches, W_patches] final trunk instance segmentation
+                - context_based_mask: [H_patches, W_patches] raw context-based inference result
+                - bbox_tracking_info: List of dicts with bbox_index, tracking_index, and bbox coordinates
+                - feature_map: [H_patches, W_patches, feature_dim] features for this frame
+                - frame_idx: Frame index in sequence
         """
         print(f"\n=== PROCESSING FRAME {self.frame_count} ===")
 
@@ -707,51 +712,33 @@ class TrunkVideoTracker:
         binary_semantic_segmentation = torch.from_numpy(
             self.create_binary_semantic_segmentation(segmentation_array, self.segmentation_class_id)).long()
 
-        # Case (a): Empty context window - create initial instances
-        if len(self.context_frames) == 0:
+        # Determine processing approach based on context availability
+        is_first_frame = len(self.context_frames) == 0
+        
+        if is_first_frame:
             print("Empty context window - creating initial trunk instances")
-
+            # For first frame: use simple instance creation
             trunk_instance_mask = self.create_initial_trunk_instances(
                 binary_semantic_segmentation,
                 video_frame.detections_scaled,
                 patch_size,
                 target_image_size
             )
-
-            # For first frame, context_based_mask is the same as final mask
+            # For first frame, context_based_mask equals final mask
             context_based_mask = trunk_instance_mask.clone()
-
-            # Create bbox tracking info for first frame (simple mapping)
-            bbox_tracking_info = []
-            for bbox_idx, detection in enumerate(video_frame.detections_scaled):
-                if 'box' in detection:
-                    bbox_info = {
-                        'bbox_index': bbox_idx,
-                        'tracking_index': bbox_idx + 1,  # Simple assignment for first frame
-                        'bbox': detection['box']
-                    }
-                    bbox_tracking_info.append(bbox_info)
-
-            # Add to context
-            frame_info = TrunkFrameInformation(trunk_instance_mask, features, self.frame_count,
-                                               context_based_mask=context_based_mask)
-            self.context_frames.append(frame_info)
-
+            bbox_tracking_info = self._create_bbox_tracking_info_first_frame(
+                video_frame.detections_scaled
+            )
         else:
-            # Case (b): Context window has frames - perform tracking
             print(f"Context window has {len(self.context_frames)} frames - performing tracking")
-
-            # Create temp index mapping
+            # For subsequent frames: use context-based tracking + aggregation
             temp_mapping = self.create_temp_index_mapping()
-
-            # Step 1: Context-based inference
             context_based_mask = self.compute_context_based_instances(
                 features,
                 binary_semantic_segmentation,
                 temp_mapping
             )
-
-            # Step 2: Aggregate instances using bounding box analysis
+            # Get both trunk_instance_mask and bbox_tracking_info from aggregation
             trunk_instance_mask, bbox_tracking_info = self.aggregate_frame_instances(
                 context_based_mask,
                 video_frame.detections_scaled,
@@ -760,21 +747,49 @@ class TrunkVideoTracker:
                 target_image_size
             )
 
-            # Add to context with both masks
-            frame_info = TrunkFrameInformation(
-                trunk_instance_mask,
-                features,
-                self.frame_count,
-                context_based_mask=context_based_mask
-            )
-            self.context_frames.append(frame_info)
+        # Add frame to context (unified for both cases)
+        frame_info = TrunkFrameInformation(
+            trunk_instance_mask,
+            features,
+            self.frame_count,
+            context_based_mask=context_based_mask,
+            bbox_tracking_info=bbox_tracking_info
+        )
+        self.context_frames.append(frame_info)
 
         # Maintain context window size
         if len(self.context_frames) > self.context_window_size:
             self.context_frames.pop(0)
 
         self.frame_count += 1
-        return trunk_instance_mask, context_based_mask, bbox_tracking_info
+        return frame_info
+
+    def _create_bbox_tracking_info_first_frame(
+            self,
+            detections_scaled: List[Dict]
+    ) -> List[Dict[str, Any]]:
+        """
+        Create bbox tracking info for first frame with simple sequential assignment.
+        
+        Args:
+            detections_scaled: List of detection dictionaries
+            
+        Returns:
+            List of bbox tracking info dictionaries
+        """
+        bbox_tracking_info = []
+        
+        # First frame: simple sequential assignment
+        for bbox_idx, detection in enumerate(detections_scaled):
+            if 'box' in detection:
+                bbox_info = {
+                    'bbox_index': bbox_idx,
+                    'tracking_index': bbox_idx + 1,  # Simple assignment for first frame
+                    'bbox': detection['box']
+                }
+                bbox_tracking_info.append(bbox_info)
+        
+        return bbox_tracking_info
 
     def create_binary_semantic_segmentation(self, full_semantic_segmentation: np.ndarray, class_id: int):
         binary_semantic_segmentation = np.zeros_like(full_semantic_segmentation)

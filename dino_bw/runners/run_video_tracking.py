@@ -329,7 +329,7 @@ def main(
     results = []
     for i, video_frame in enumerate(tqdm(video_frames, desc="Processing frames", unit="frame")):
         # Process frame through VideoTracker
-        trunk_instance_mask, context_based_mask, bbox_tracking_info = tracker.process_frame(
+        frame_info = tracker.process_frame(
             video_frame,
             patch_size,
             target_image_size_wh
@@ -339,10 +339,10 @@ def main(
         frame_result = {
             'frame_idx': video_frame.frame_idx,
             'filename': video_frame.filename,
-            'trunk_instance_mask': trunk_instance_mask,
-            'context_based_mask': context_based_mask,
-            'bbox_tracking_info': bbox_tracking_info,
-            'num_trunk_instances': len(trunk_instance_mask.unique()) - 1,  # Exclude background
+            'trunk_instance_mask': frame_info.trunk_instance_mask,
+            'context_based_mask': frame_info.context_based_mask,
+            'bbox_tracking_info': frame_info.bbox_tracking_info,
+            'num_trunk_instances': len(frame_info.trunk_instance_mask.unique()) - 1,  # Exclude background
             'active_trunk_indexes': sorted(tracker.trunk_indexes)
         }
         results.append(frame_result)
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     tree_class_id = get_class_idx_from_name(data_accessor, "tree")
 
     # Run with custom frame indices (first 20 frames for testing)
-    frame_indices = np.arange(200, 249).astype('int')
+    frame_indices = np.arange(190, 195).astype('int')
 
     result = main(
         data_folder=data_folder,

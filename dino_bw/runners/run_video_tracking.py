@@ -100,7 +100,7 @@ def index_to_color(index: int) -> Tuple[int, int, int]:
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
-def create_enhanced_frame_visualization(
+def create_frame_visualizations(
         video_frame: 'VideoFrameData',
         result: Dict[str, Any],
         context_based_mask: Optional[torch.Tensor] = None,
@@ -357,12 +357,9 @@ def main(
 
         for i, result in enumerate(results):
             video_frame = video_frames[i]
-
-            # Use the stored context_based_mask from the result
             context_based_mask = result.get('context_based_mask', None)
 
-            # Create enhanced visualizations
-            bbox_overlay, final_segmentation, context_overlay = create_enhanced_frame_visualization(
+            bbox_overlay, final_segmentation, context_overlay = create_frame_visualizations(
                 video_frame=video_frame,
                 result=result,
                 context_based_mask=context_based_mask,
@@ -370,7 +367,6 @@ def main(
                 data_folder=data_folder
             )
 
-            # Save visualizations
             save_frame_visualizations(
                 bbox_overlay=bbox_overlay,
                 final_segmentation=final_segmentation,

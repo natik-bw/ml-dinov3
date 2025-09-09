@@ -615,16 +615,19 @@ def mask_to_rgb(mask: np.ndarray, num_masks: int) -> np.ndarray:
 class FrameInformation:
     """Stores information for a single frame in the context window."""
 
-    def __init__(self, trunk_instance_mask: torch.Tensor, feature_map: torch.Tensor, frame_idx: int):
+    def __init__(self, trunk_instance_mask: torch.Tensor, feature_map: torch.Tensor, frame_idx: int,
+                 context_based_mask: Optional[torch.Tensor] = None):
         """
         Args:
-            trunk_instance_mask: [H_patches, W_patches] trunk instance segmentation mask
+            trunk_instance_mask: [H_patches, W_patches] final trunk instance segmentation mask
             feature_map: [H_patches, W_patches, feature_dim] feature map
             frame_idx: Frame index in the video sequence
+            context_based_mask: [H_patches, W_patches] raw context-based inference result (optional)
         """
         self.trunk_instance_mask = trunk_instance_mask
         self.feature_map = feature_map
         self.frame_idx = frame_idx
+        self.context_based_mask = context_based_mask
 
 
 class VideoTracker:
@@ -634,16 +637,20 @@ class VideoTracker:
     Maintains context frames and trunk indexes for temporal tracking.
     """
 
-    def __init__(self, tree_class_id: int = 2, trunk_od_class_name: str = 'trunk', context_window_size: int = 5):
+    def __init__(self, tree_class_id: int = 2, trunk_od_class_name: str = 'trunk', context_window_size: int = 5,
+                 most_likely_id_min_ratio: float = 0.5):
         """
         Args:
             tree_class_id: Class ID for trunks in semantic segmentation
+            trunk_od_class_name: Object detection class name for trunks
             context_window_size: Maximum number of frames to keep in context
+            most_likely_id_min_ratio: Minimum ratio for majority trunk ID assignment (default: 0.5)
         """
         self.segmentation_class_id = tree_class_id
         self.od_class_name = trunk_od_class_name
 
         self.context_window_size = context_window_size
+        self.most_likely_id_min_ratio = most_likely_id_min_ratio
 
         # History storage
         self.context_frames: List[FrameInformation] = []
@@ -704,12 +711,9 @@ class VideoTracker:
 
         # Process each detection box
         for bbox in trunk_bboxes:
-            x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
-
-            patch_x1 = max(0, min(int(x1 / patch_size), w_patches - 1))
-            patch_y1 = max(0, min(int(y1 / patch_size), h_patches - 1))
-            patch_x2 = max(0, min(int(x2 / patch_size), w_patches - 1))
-            patch_y2 = max(0, min(int(y2 / patch_size), h_patches - 1))
+            patch_x1, patch_y1, patch_x2, patch_y2 = self.bbox_to_patch_coords(
+                bbox, patch_size, w_patches, h_patches
+            )
             box_trunk_patches = tree_patches[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
 
             if box_trunk_patches.sum() > 0:
@@ -822,8 +826,13 @@ class VideoTracker:
 
         # Extract features and segmentation
         features = video_frame.features.float()  # [H_patches, W_patches, feature_dim]
+
+        if video_frame.segmentation is None:
+            raise ValueError("Video frame segmentation is None")
+
+        segmentation_array = np.array(video_frame.segmentation)
         binary_semantic_segmentation = torch.from_numpy(
-            self.create_binary_semantic_segmentation(video_frame.segmentation, self.segmentation_class_id)).long()
+            self.create_binary_semantic_segmentation(segmentation_array, self.segmentation_class_id)).long()
 
         # Case (a): Empty context window - create initial instances
         if len(self.context_frames) == 0:
@@ -847,8 +856,8 @@ class VideoTracker:
             # Create temp index mapping
             temp_mapping = self.create_temp_index_mapping()
 
-            # Implement context-based inference
-            trunk_instance_mask = self.compute_context_based_inference(
+            # Step 1: Context-based inference
+            context_based_mask = self.compute_context_based_instances(
                 features,
                 binary_semantic_segmentation,
                 temp_mapping,
@@ -856,8 +865,22 @@ class VideoTracker:
                 target_image_size
             )
 
-            # Add to context
-            frame_info = FrameInformation(trunk_instance_mask, features, self.frame_count)
+            # Step 2: Aggregate instances using bounding box analysis
+            trunk_instance_mask = self.aggregate_frame_instances(
+                context_based_mask,
+                video_frame.detections_scaled,
+                binary_semantic_segmentation,
+                patch_size,
+                target_image_size
+            )
+
+            # Add to context with both masks
+            frame_info = FrameInformation(
+                trunk_instance_mask,
+                features,
+                self.frame_count,
+                context_based_mask=context_based_mask
+            )
             self.context_frames.append(frame_info)
 
         # Maintain context window size
@@ -872,7 +895,35 @@ class VideoTracker:
         binary_semantic_segmentation[full_semantic_segmentation == class_id] = 1
         return binary_semantic_segmentation
 
-    def compute_context_based_inference(
+    def bbox_to_patch_coords(
+            self,
+            bbox: Dict[str, float],
+            patch_size: int,
+            w_patches: int,
+            h_patches: int
+    ) -> Tuple[int, int, int, int]:
+        """
+        Convert bounding box coordinates to patch coordinates.
+        
+        Args:
+            bbox: Bounding box with 'x1', 'y1', 'x2', 'y2' keys
+            patch_size: Size of patches in pixels
+            w_patches: Number of patches in width
+            h_patches: Number of patches in height
+            
+        Returns:
+            Tuple of (patch_x1, patch_y1, patch_x2, patch_y2) in patch coordinates
+        """
+        x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+        patch_x1 = max(0, min(int(x1 / patch_size), w_patches - 1))
+        patch_y1 = max(0, min(int(y1 / patch_size), h_patches - 1))
+        patch_x2 = max(0, min(int(x2 / patch_size), w_patches - 1))
+        patch_y2 = max(0, min(int(y2 / patch_size), h_patches - 1))
+
+        return patch_x1, patch_y1, patch_x2, patch_y2
+
+    def compute_context_based_instances(
             self,
             current_features: torch.Tensor,  # [H_patches, W_patches, feature_dim]
             current_segmentation: torch.Tensor,  # [H_patches, W_patches] binary segmentation
@@ -975,6 +1026,145 @@ class VideoTracker:
         print(f"  Unique trunk IDs in result: {unique_trunk_ids}")
 
         return trunk_instance_mask
+
+    def aggregate_frame_instances(
+            self,
+            context_based_mask: torch.Tensor,  # [H_patches, W_patches] result from context-based inference
+            trunk_detections: List[Dict],  # List of trunk bounding boxes
+            semantic_segmentation: torch.Tensor,  # [H_patches, W_patches] binary semantic mask
+            patch_size: int,
+            target_image_size: Tuple[int, int]
+    ) -> torch.Tensor:
+        """
+        Aggregate trunk instances using bounding box analysis and conflict resolution.
+        
+        Steps:
+        1. For each bounding box, find majority trunk index (>50% threshold)
+        2. Resolve conflicts when multiple boxes have same trunk index
+        3. Create final segmentation mask
+        
+        Args:
+            context_based_mask: Raw result from context-based inference
+            trunk_detections: List of trunk detection bounding boxes
+            semantic_segmentation: Binary semantic segmentation (1=tree, 0=background)
+            patch_size: Size of patches
+            target_image_size: Target image size
+            
+        Returns:
+            final_trunk_mask: [H_patches, W_patches] final trunk instance assignments
+        """
+        print(f"=== AGGREGATING FRAME INSTANCES ===")
+        print(f"Processing {len(trunk_detections)} trunk bounding boxes")
+
+        h_patches, w_patches = context_based_mask.shape
+
+        # Step 1: Analyze each bounding box for majority trunk index
+        bbox_trunk_assignments = {}  # bbox_idx -> assigned_trunk_id
+
+        for detection_index, detection in enumerate(trunk_detections):
+            # Convert to patch coordinates
+            patch_x1, patch_y1, patch_x2, patch_y2 = self.bbox_to_patch_coords(
+                detection['box'], patch_size, w_patches, h_patches
+            )
+
+            # Extract patches in this bounding box
+            bbox_mask = context_based_mask[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
+            bbox_semantic = semantic_segmentation[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
+
+            # Get non-background tree patches
+            non_bg_tree_mask = (bbox_mask != self.background_id) & (bbox_semantic == 1)
+            trunk_ids_in_box = bbox_mask[non_bg_tree_mask]
+
+            # Find majority (handles empty case naturally)
+            if len(trunk_ids_in_box) > 0:
+                unique_ids, counts = torch.unique(trunk_ids_in_box, return_counts=True)
+                max_count_idx = torch.argmax(counts)
+                most_frequent_id = unique_ids[max_count_idx].item()
+                max_count = counts[max_count_idx].item()
+                percentage = max_count / len(trunk_ids_in_box)
+            else:
+                percentage = 0.0
+
+            if percentage >= self.most_likely_id_min_ratio and percentage > 0:
+                bbox_trunk_assignments[detection_index] = most_frequent_id
+                print(
+                    f"  BBox {detection_index}: Majority trunk ID {most_frequent_id} ({percentage:.2%} of {len(trunk_ids_in_box)} patches)")
+            else:
+                bbox_trunk_assignments[detection_index] = self.get_next_trunk_id()
+                reason = "No valid tree patches" if percentage == 0 else f"No majority found (best: {percentage:.2%})"
+                print(
+                    f"  BBox {detection_index}: {reason}, assigning new trunk ID {bbox_trunk_assignments[detection_index]}")
+
+        # Step 2: Resolve conflicts (multiple boxes with same trunk ID)
+        trunk_id_to_bboxes = {}  # type: Dict[int, List[int]]
+        for detection_index, trunk_id in bbox_trunk_assignments.items():
+            if trunk_id not in trunk_id_to_bboxes:
+                trunk_id_to_bboxes[trunk_id] = []
+            trunk_id_to_bboxes[trunk_id].append(detection_index)
+
+        # Resolve conflicts by choosing most probable box and reassigning others
+        for trunk_id, bbox_indices in trunk_id_to_bboxes.items():
+            if len(bbox_indices) > 1:
+                print(f"  Conflict: Trunk ID {trunk_id} assigned to {len(bbox_indices)} boxes: {bbox_indices}")
+
+                # Calculate confidence scores for each conflicting box
+                bbox_scores = []
+                for detection_index in bbox_indices:
+                    detection = trunk_detections[detection_index]
+
+                    # Convert to patch coordinates
+                    patch_x1, patch_y1, patch_x2, patch_y2 = self.bbox_to_patch_coords(
+                        detection['box'], patch_size, w_patches, h_patches
+                    )
+
+                    # Count patches assigned to this trunk ID
+                    bbox_mask = context_based_mask[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
+                    bbox_semantic = semantic_segmentation[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
+
+                    # Score based on number of patches with this trunk ID
+                    target_patches = (bbox_mask == trunk_id) & (bbox_semantic == 1)
+                    score = target_patches.sum().item()
+                    bbox_scores.append((detection_index, score))
+
+                # Sort by score (highest first) and keep the best one
+                bbox_scores.sort(key=lambda x: x[1], reverse=True)
+                best_bbox_idx = bbox_scores[0][0]
+
+                print(f"    Keeping trunk ID {trunk_id} for bbox {best_bbox_idx} (score: {bbox_scores[0][1]})")
+
+                # Reassign new trunk IDs to the rest
+                for detection_index, score in bbox_scores[1:]:
+                    new_id = self.get_next_trunk_id()
+                    bbox_trunk_assignments[detection_index] = new_id
+                    print(f"    Reassigning bbox {detection_index} to new trunk ID {new_id} (score was: {score})")
+
+        # Step 3: Create final segmentation mask
+        final_trunk_mask = torch.zeros_like(context_based_mask)
+
+        for detection_index, assigned_trunk_id in bbox_trunk_assignments.items():
+            detection = trunk_detections[detection_index]
+
+            # Convert to patch coordinates
+            patch_x1, patch_y1, patch_x2, patch_y2 = self.bbox_to_patch_coords(
+                detection['box'], patch_size, w_patches, h_patches
+            )
+
+            # Assign trunk ID to tree patches in this bounding box
+            tree_mask_in_box = semantic_segmentation[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1] == 1
+            final_trunk_mask[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1][tree_mask_in_box] = assigned_trunk_id
+
+        # Summary statistics
+        num_assigned = (final_trunk_mask > 0).sum().item()
+        num_tree_patches = (semantic_segmentation == 1).sum().item()
+        unique_trunk_ids = final_trunk_mask.unique().tolist()
+        if self.background_id in unique_trunk_ids:
+            unique_trunk_ids.remove(self.background_id)
+
+        print(f"Final aggregation: {num_assigned}/{num_tree_patches} tree patches assigned")
+        print(f"Unique trunk IDs: {unique_trunk_ids}")
+        print(f"Total trunk instances: {len(unique_trunk_ids)}")
+
+        return final_trunk_mask
 
     def prepare_context_features(
             self,

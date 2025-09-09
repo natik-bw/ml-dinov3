@@ -13,7 +13,7 @@ Based on the segmentation tracking approach from segmentation_tracking.ipynb
 
 import warnings
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Union, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -27,26 +27,12 @@ from dino_bw.utils.dino_embeddings_utils import get_class_idx_from_name
 from bw_ml_common.datasets.data_accessor_factory import create_dataset_accessor
 
 from dino_bw.utils.tracking_processing import propogate_context_masked_probs, make_neighborhood_mask, VideoFrameData, \
-    TreesTracker
+    TreesTracker, normalize_probs, extract_frames_from_cache
 
 
 # ============================================================================
 # TREE INSTANCE TRACKING DATA STRUCTURE
 # ============================================================================
-
-
-def normalize_probs(
-        probs: Tensor,  # [B, M, H', W']
-) -> Tensor:
-    """
-    Normalize and clean probability distributions.
-    Adapted from segmentation_tracking.ipynb.
-    """
-    vmin = probs.flatten(2, 3).min(dim=2).values  # [B, M]
-    vmax = probs.flatten(2, 3).max(dim=2).values  # [B, M]
-    probs = (probs - vmin[:, :, None, None]) / (vmax[:, :, None, None] - vmin[:, :, None, None])
-    probs = torch.nan_to_num(probs, nan=0)
-    return probs  # [B, M, H', W']
 
 
 def track_first_to_second_frame(
@@ -453,71 +439,6 @@ def visualize_first_to_second_tracking_results(
             print(f"Saved probability maps to {save_path / 'tree_instance_probabilities.png'}")
 
         plt.show()
-
-
-def extract_frames_from_cache(
-        cache_data: Dict[str, Any],
-        frame_indices: Optional[Union[List[int], np.ndarray]] = None,
-        require_segmentation: bool = True,
-        require_detections: bool = False
-) -> List[VideoFrameData]:
-    """
-    Extract frame data from cache similar to run_tracking_processor.py.
-    
-    Args:
-        cache_data: Loaded cache data from tracking_data_processor.py
-        frame_indices: Specific frame indices to extract (default: auto-select)
-        require_segmentation: Whether frames must have segmentation data
-        require_detections: Whether frames must have detection data
-        
-    Returns:
-        List of VideoFrameData objects
-    """
-    print("=== EXTRACTING FRAMES FROM CACHE ===")
-
-    # Select frames to process
-    if frame_indices is None:
-        # Auto-select frames with valid data (similar to run_tracking_processor.py)
-        valid_frames = []
-        for i, frame in enumerate(cache_data['frames']):
-            has_detections = len(frame.get('detections', [])) > 0
-            has_segmentation = frame.get('segmentation') is not None
-
-            # Apply requirements
-            if require_segmentation and not has_segmentation:
-                continue
-            if require_detections and not has_detections:
-                continue
-
-            valid_frames.append(i)
-
-        if len(valid_frames) < 2:
-            raise ValueError(f"Need at least 2 frames with valid data, found {len(valid_frames)}")
-
-        # For video tracking, we want a contiguous sequence
-        # Take a reasonable subset if too many frames
-        if len(valid_frames) > 50:
-            # Take first 50 frames for manageable processing
-            frame_indices = valid_frames[:50]
-        else:
-            frame_indices = valid_frames
-
-    print(f"Selected {len(frame_indices)} frames: {frame_indices[:10]}{'...' if len(frame_indices) > 10 else ''}")
-
-    # Extract frame data
-    video_frames = []
-    for i, frame_idx in enumerate(frame_indices):
-        frame_data = cache_data['frames'][int(frame_idx)]
-        video_frame = VideoFrameData(frame_data, frame_idx)
-        video_frames.append(video_frame)
-
-        # if i < 5:  # Print details for first few frames
-        #     print(f"  Frame {frame_idx}: {video_frame.filename}, "
-        #           f"features: {video_frame.features.shape}, "
-        #           f"segmentation: {video_frame.has_segmentation}, "
-        #           f"detections: {video_frame.has_detections}")
-
-    return video_frames
 
 
 def create_reference_segmentation(

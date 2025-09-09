@@ -9,23 +9,19 @@ This script implements multi-frame tree object tracking by:
 4. Creating comprehensive visualizations for individual frames and correspondences
 5. Finding correspondences between the first two frames using Hungarian matching
 """
-
+import pickle
 from pathlib import Path
 from typing import List, Optional, Union
 
 import numpy as np
 
-from tracking_data_processor import load_tracking_cache
 from dino_bw.utils.dino_embeddings_utils import get_class_idx_from_name
 from bw_ml_common.datasets.data_accessor_factory import create_dataset_accessor
 
-from feature_extraction_utils import (
-    extract_tree_objects_from_frame, compute_unified_pca,
+from dino_bw.utils.feature_extraction_utils import extract_tree_objects_from_frame, compute_unified_pca, \
     apply_pca_coloring_to_patches
-)
-from tracking_vis_utils import (
-    visualize_tree_objects, visualize_patch_colors, visualize_united_pca_overlay
-)
+from dino_bw.utils.tracking_visualizations import visualize_tree_objects, visualize_patch_colors, \
+    visualize_united_pca_overlay
 
 
 def main(
@@ -53,7 +49,8 @@ def main(
     print("=" * 80)
 
     # Check cache validity and parameters
-    cache_data = load_tracking_cache(cache_path)
+    with open(cache_path, 'rb') as f:
+        cache_data = pickle.load(f)
     metadata = cache_data.get('metadata')
     if metadata is None:
         print("unable to fetch cache metadata")

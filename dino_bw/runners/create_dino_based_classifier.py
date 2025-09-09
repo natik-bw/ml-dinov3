@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dino_bw.bw_dino_defs import MODEL_TO_NUM_LAYERS
+from dino_bw.bw_defs import MODEL_TO_NUM_LAYERS
 from dino_bw.utils.dino_classifier_training import split_to_folds, calculate_fold_scores, accumulate_cv_statistics, \
     retrain_optimal_classifier
 from dino_bw.utils.dino_embeddings_utils import extract_raw_features, extract_all_features

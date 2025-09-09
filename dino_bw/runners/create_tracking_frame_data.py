@@ -353,10 +353,42 @@ def process_tracking_dataset(
     return cache_data
 
 
-def load_tracking_cache(cache_path: Path) -> Dict[str, Any]:
-    """Load the processed tracking cache."""
-    with open(cache_path, 'rb') as f:
-        return pickle.load(f)
+def load_tracking_cache(cache_path: Path, patch_size: Optional[int] = None, image_size: Optional[int] = None) -> Union[Dict[str, Any], Tuple[bool, Optional[Dict[str, Any]]]]:
+    """
+    Load the processed tracking cache and optionally validate parameters.
+    
+    Args:
+        cache_path: Path to the cache file
+        patch_size: Expected patch size for validation (optional)
+        image_size: Expected image size for validation (optional)
+    
+    Returns:
+        If patch_size and image_size are provided: tuple of (is_valid, cache_data)
+        Otherwise: the loaded cache data dictionary
+    """
+    try:
+        with open(cache_path, 'rb') as f:
+            cache_data = pickle.load(f)
+        
+        # If validation parameters are provided, perform validation
+        if patch_size is not None and image_size is not None:
+            metadata = cache_data.get('metadata')
+            if metadata is None:
+                return False, None
+            
+            cache_patch_size = metadata.get('patch_size', None)
+            cache_image_size = metadata.get('image_size', None)
+            
+            if cache_patch_size != patch_size or cache_image_size != image_size:
+                return False, None
+            
+            return True, cache_data
+        
+        # If no validation parameters, return the cache data
+        return cache_data
+        
+    except Exception:
+        return (False, None) if (patch_size is not None and image_size is not None) else {}
 
 
 def main():

@@ -402,7 +402,7 @@ if __name__ == "__main__":
     tree_class_id = get_class_idx_from_name(data_accessor, "tree")
 
     # Run with custom frame indices (first 20 frames for testing)
-    frame_indices = np.arange(190, 195).astype('int')
+    frame_indices = np.arange(200, 249).astype('int')
 
     result = main(
         data_folder=data_folder,

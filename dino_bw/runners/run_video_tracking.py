@@ -13,12 +13,13 @@ Based on the segmentation tracking approach from segmentation_tracking.ipynb
 
 import warnings
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Set
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from tqdm import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 
@@ -27,7 +28,7 @@ from dino_bw.utils.dino_embeddings_utils import get_class_idx_from_name
 from bw_ml_common.datasets.data_accessor_factory import create_dataset_accessor
 
 from dino_bw.utils.tracking_processing import propogate_context_masked_probs, make_neighborhood_mask, VideoFrameData, \
-    TreesTracker, normalize_probs, extract_frames_from_cache
+    TreesTracker, normalize_probs, extract_frames_from_cache  # Note: TreesTracker used in reference function
 
 
 # ============================================================================
@@ -611,7 +612,208 @@ def mask_to_rgb(mask: np.ndarray, num_masks: int) -> np.ndarray:
     return mask_rgb
 
 
-def main(
+class FrameInformation:
+    """Stores information for a single frame in the context window."""
+
+    def __init__(self, trunk_instance_mask: torch.Tensor, feature_map: torch.Tensor, frame_idx: int):
+        """
+        Args:
+            trunk_instance_mask: [H_patches, W_patches] trunk instance segmentation mask
+            feature_map: [H_patches, W_patches, feature_dim] feature map
+            frame_idx: Frame index in the video sequence
+        """
+        self.trunk_instance_mask = trunk_instance_mask
+        self.feature_map = feature_map
+        self.frame_idx = frame_idx
+
+
+class VideoTracker:
+    """
+    Modular video tracker for trunk instances across frames.
+    
+    Maintains context frames and trunk indexes for temporal tracking.
+    """
+
+    def __init__(self, tree_class_id: int = 2, trunk_od_class_name: str = 'trunk', context_window_size: int = 5):
+        """
+        Args:
+            tree_class_id: Class ID for trunks in semantic segmentation
+            context_window_size: Maximum number of frames to keep in context
+        """
+        self.segmentation_class_id = tree_class_id
+        self.od_class_name = trunk_od_class_name
+
+        self.context_window_size = context_window_size
+
+        # History storage
+        self.context_frames: List[FrameInformation] = []
+        self.trunk_indexes: Set[int] = set()  # All trunk indexes ever assigned
+
+        # Internal state
+        self.next_trunk_id = 1  # Start from 1, background is 0
+        self.frame_count = 0
+
+    def get_next_trunk_id(self) -> int:
+        """Get the next available trunk ID."""
+        trunk_id = self.next_trunk_id
+        self.next_trunk_id += 1
+        self.trunk_indexes.add(trunk_id)
+        return trunk_id
+
+    def create_initial_trunk_instances(
+            self,
+            segmentation_mask: torch.Tensor,
+            detections: List[Dict],
+            patch_size: int,
+            target_image_size: Tuple[int, int]
+    ) -> torch.Tensor:
+        """
+        Create initial trunk instances from semantic segmentation and detections.
+        Similar to TreesTracker::create_initial_instances but adapted for trunk terminology.
+        
+        Args:
+            segmentation_mask: [H_patches, W_patches] semantic segmentation
+            detections: List of detection boxes
+            patch_size: Size of patches
+            target_image_size: (width, height) of target image
+            
+        Returns:
+            instance_mask: [H_patches, W_patches] trunk instance segmentation
+        """
+        print(f"=== CREATING INITIAL TRUNK INSTANCES (Frame {self.frame_count}) ===")
+
+        h_patches, w_patches = segmentation_mask.shape
+
+        # Initialize instance mask with all background (0)
+        instance_mask = torch.zeros_like(segmentation_mask)
+
+        # Find trunk patches
+        tree_patches = (segmentation_mask == 1)
+        trunk_bboxes = [detection['box'] for detection in detections if
+                        'box' in detection and detection['name'] == self.od_class_name]
+
+        if not tree_patches.any():
+            print("No tree patches found in segmentation")
+            return instance_mask
+
+        print(f"Found {tree_patches.sum().item()} tree patches")
+        print(f"Processing {len(detections)} trunk detections")
+
+        instance_count = 0
+
+        # Process each detection box
+        for bbox in trunk_bboxes:
+            x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
+
+            patch_x1 = max(0, min(int(x1 / patch_size), w_patches - 1))
+            patch_y1 = max(0, min(int(y1 / patch_size), h_patches - 1))
+            patch_x2 = max(0, min(int(x2 / patch_size), w_patches - 1))
+            patch_y2 = max(0, min(int(y2 / patch_size), h_patches - 1))
+            box_trunk_patches = tree_patches[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1]
+
+            if box_trunk_patches.sum() > 0:
+                instance_id = self.get_next_trunk_id()
+                instance_mask[patch_y1:patch_y2 + 1, patch_x1:patch_x2 + 1][box_trunk_patches] = instance_id
+
+                print(f"  Created trunk instance {instance_id}: bbox=({patch_x1},{patch_y1})->({patch_x2},{patch_y2}), "
+                      f"{box_trunk_patches.sum().item()} patches")
+                instance_count += 1
+
+        print(f"Created {instance_count} trunk instances")
+        print(f"Active trunk indexes: {sorted(self.trunk_indexes)}")
+
+        return instance_mask
+
+    def create_temp_index_mapping(self) -> Dict[int, int]:
+        """
+        Create mapping from trunk indexes to continuous temporary indexes.
+        
+        Returns:
+            Dict mapping original trunk_id -> temp_id (0=background, 1,2,3... for trunks)
+        """
+        # Collect all trunk indexes from context frames
+        active_trunk_ids = set()
+        for frame_info in self.context_frames:
+            unique_ids = frame_info.trunk_instance_mask.unique()
+            # Filter out background (0)
+            active_trunk_ids.update([id.item() for id in unique_ids if id.item() != 0])
+
+        # Create continuous mapping: 0=background, 1,2,3... for active trunks
+        temp_mapping = {0: 0}  # Background stays 0
+        for i, trunk_id in enumerate(sorted(active_trunk_ids), start=1):
+            temp_mapping[trunk_id] = i
+
+        print(f"Created temp index mapping: {temp_mapping}")
+        return temp_mapping
+
+    def process_frame(
+            self,
+            video_frame: 'VideoFrameData',
+            patch_size: int,
+            target_image_size: Tuple[int, int]
+    ) -> torch.Tensor:
+        """
+        Process a single frame and return trunk instance segmentation.
+        
+        Args:
+            video_frame: VideoFrameData object containing frame information
+            patch_size: Size of patches
+            target_image_size: (width, height) of target image
+            
+        Returns:
+            trunk_instance_mask: [H_patches, W_patches] trunk instance segmentation
+        """
+        print(f"\n=== PROCESSING FRAME {self.frame_count} ===")
+
+        # Extract features and segmentation
+        features = video_frame.features.float()  # [H_patches, W_patches, feature_dim]
+        binary_semantic_segmentation = torch.from_numpy(
+            self.create_binary_semantic_segmentation(video_frame.segmentation, self.segmentation_class_id)).long()
+
+        # Case (a): Empty context window - create initial instances
+        if len(self.context_frames) == 0:
+            print("Empty context window - creating initial trunk instances")
+
+            trunk_instance_mask = self.create_initial_trunk_instances(
+                binary_semantic_segmentation,
+                video_frame.detections_scaled,
+                patch_size,
+                target_image_size
+            )
+
+            # Add to context
+            frame_info = FrameInformation(trunk_instance_mask, features, self.frame_count)
+            self.context_frames.append(frame_info)
+
+        else:
+            # Case (b): Context window has frames - perform tracking
+            print(f"Context window has {len(self.context_frames)} frames - performing tracking")
+
+            # Create temp index mapping
+            temp_mapping = self.create_temp_index_mapping()
+
+            # TODO: Implement propagation logic here
+            # For now, create a dummy mask
+            trunk_instance_mask = torch.zeros_like(segmentation)
+
+            # Add to context
+            frame_info = FrameInformation(trunk_instance_mask, features, self.frame_count)
+            self.context_frames.append(frame_info)
+
+        # Maintain context window size
+        if len(self.context_frames) > self.context_window_size:
+            self.context_frames.pop(0)
+
+        self.frame_count += 1
+        return trunk_instance_mask
+
+    def create_binary_semantic_segmentation(self, full_semantic_segmentation: np.ndarray, class_id: int):
+        binary_semantic_segmentation = np.zeros_like(full_semantic_segmentation)
+        binary_semantic_segmentation[full_semantic_segmentation == class_id] = 1
+        return binary_semantic_segmentation
+
+
+def main_reference(
         data_folder: Path,
         cache_path: Path,
         tree_class_id: int,
@@ -862,6 +1064,110 @@ def main(
     }
 
 
+def main(
+        data_folder: Path,
+        cache_path: Path,
+        trunk_class_id: int,
+        frame_indices: np.ndarray,
+        debugging_folder: Optional[Path] = None,
+        patch_size: int = 16,
+        image_size: int = 1024
+):
+    """
+    Simplified main video tracking processor using VideoTracker.
+    
+    Args:
+        data_folder: Path to dataset folder
+        cache_path: Path to cached DINO features and segmentation  
+        trunk_class_id: Class ID for trunks
+        debugging_folder: Optional folder for saving debug visualizations
+        frame_indices: Array of frame indices to process
+        patch_size: DINO patch size (should match cache)
+        image_size: Target image size (should match cache)
+    """
+    print("=== SIMPLIFIED VIDEO TRACKING WITH VIDEOTRACKER ===")
+
+    # Check cache validity and load data
+    if not (cache_result := load_tracking_cache(cache_path, patch_size, image_size))[0]:
+        warnings.warn(
+            "Cache validation failed - parameters mismatch or missing metadata. Please run tracking_data_processor.py with correct parameters first",
+            RuntimeWarning)
+        return
+    cache_data = cache_result[1]
+
+    # Extract video frames
+    video_frames = extract_frames_from_cache(
+        cache_data,
+        frame_indices=frame_indices,
+        require_segmentation=True,
+        require_detections=True
+    )
+
+    if len(video_frames) == 0:
+        warnings.warn("No valid frames found for processing", RuntimeWarning)
+        return
+    print(f"Processing {len(video_frames)} frames with VideoTracker")
+    target_image_size_wh = cache_data['frames'][0]['target_image_size']
+
+    # Initialize VideoTracker
+    tracker = VideoTracker(tree_class_id=trunk_class_id, context_window_size=5)
+    # Process each frame
+    results = []
+    for i, video_frame in enumerate(tqdm(video_frames, desc="Processing frames", unit="frame")):
+        # Process frame through VideoTracker
+        trunk_instance_mask = tracker.process_frame(
+            video_frame,
+            patch_size,
+            target_image_size_wh
+        )
+
+        # Store results
+        frame_result = {
+            'frame_idx': video_frame.frame_idx,
+            'filename': video_frame.filename,
+            'trunk_instance_mask': trunk_instance_mask,
+            'num_trunk_instances': len(trunk_instance_mask.unique()) - 1,  # Exclude background
+            'active_trunk_indexes': sorted(tracker.trunk_indexes)
+        }
+        results.append(frame_result)
+
+        print(f"  Result: {frame_result['num_trunk_instances']} trunk instances")
+        print(f"  Active trunk indexes: {frame_result['active_trunk_indexes']}")
+
+    # Optionally save debug visualizations
+    if debugging_folder:
+        debugging_folder.mkdir(parents=True, exist_ok=True)
+        print(f"\nSaving debug visualizations to {debugging_folder}")
+
+        for i, result in enumerate(results):
+            save_path = debugging_folder / f"frame_{i:03d}_trunks.png"
+
+            # Simple visualization
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+            trunk_mask = result['trunk_instance_mask'].cpu().numpy()
+            ax.imshow(mask_to_rgb(trunk_mask, result['num_trunk_instances'] + 1))
+            ax.set_title(f"Frame {result['frame_idx']}: {result['num_trunk_instances']} trunk instances")
+            ax.axis('off')
+
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+    print(f"\n=== TRACKING COMPLETE ===")
+    print(f"Processed {len(results)} frames")
+    print(f"Total trunk indexes assigned: {len(tracker.trunk_indexes)}")
+    print(f"Final context window size: {len(tracker.context_frames)}")
+
+    return {
+        'results': results,
+        'tracker': tracker,
+        'video_frames': video_frames,
+        'cache_data': cache_data
+    }
+
+
 if __name__ == "__main__":
     # Example usage - update these paths for your setup
     data_folder = Path("/home/nati/source/data/greeting_dev/bags_parsed/turn8_0")
@@ -878,7 +1184,7 @@ if __name__ == "__main__":
     result = main(
         data_folder=data_folder,
         cache_path=cache_path,
-        tree_class_id=tree_class_id,
+        trunk_class_id=tree_class_id,
         frame_indices=frame_indices,
         debugging_folder=debugging_folder,
         patch_size=16,

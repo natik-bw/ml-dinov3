@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from scipy import signal
 from sklearn.decomposition import PCA
 
-from dino_bw.utils.dino_embeddings_utils import extract_patch_features
+from dino_bw.utils.dino_embeddings import extract_patch_features
 
 
 @dataclass

@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
 
-from feature_extraction_utils import TreeObject
+from feature_extraction import TreeObject
 
 
 def visualize_tree_objects(

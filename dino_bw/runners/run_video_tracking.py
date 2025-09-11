@@ -3,12 +3,11 @@
 Video-based segmentation tracking using DINOv3 features.
 
 This script implements temporal segmentation tracking by:
-1. Loading frames from the tracking cache (similar to run_tracking_processor.py)
-2. Setting up the first frame as reference segmentation
-3. Tracking segmentation masks through subsequent frames using DINOv3 features
-4. Creating visualizations of the tracking results
+Tracking segmentation masks through subsequent frames using DINOv3 features, and
+Creating visualizations of the tracking results.
+The function assumes a pre-computed pickle file of the frames to be tracked. Such a pickle file can be created using dino_bw/runners/create_tracking_frame_data
 
-Based on the segmentation tracking approach from segmentation_tracking.ipynb
+Based on the segmentation tracking approach from notebooks/segmentation_tracking.ipynb
 """
 
 import warnings
@@ -26,7 +25,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 from create_tracking_frame_data import load_tracking_cache
-from dino_bw.utils.dino_embeddings_utils import get_class_idx_from_name
+from dino_bw.utils.dino_embeddings import get_class_idx_from_name
 from bw_ml_common.datasets.data_accessor_factory import create_dataset_accessor
 
 from dino_bw.utils.tracking_processing import propogate_context_masked_probs, make_neighborhood_mask, VideoFrameData, \
@@ -392,7 +391,6 @@ def main(
 
 
 if __name__ == "__main__":
-    # Example usage - update these paths for your setup
     data_folder = Path("/home/nati/source/data/greeting_dev/bags_parsed/turn8_0")
     cache_path = Path("/home/nati/source/data/greeting_dev/bags_parsed/turn8_0/tracking_cache_img_1024_patch_16.pkl")
     debugging_folder = Path("/home/nati/source/data/greeting_dev/bags_parsed/turn8_0/video_tracking_debug")
